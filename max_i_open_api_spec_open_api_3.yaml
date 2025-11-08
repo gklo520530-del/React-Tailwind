@@ -1,0 +1,574 @@
+openapi: 3.0.3
+info:
+  title: MAX I 專業交易投資買賣平台 API
+  version: "1.0.0"
+  description: |
+    OpenAPI 規格（簡化版）涵蓋 Auth、User/KYC、Wallets、Market (P2P orders)、Escrow、Admin。
+    目標：作為前後端開發與 mock server 的單一真 source-of-truth。
+servers:
+  - url: https://api.example.com/v1
+    description: Production server (placeholder)
+  - url: https://staging.api.example.com/v1
+    description: Staging server
+tags:
+  - name: auth
+    description: 認證與使用者登錄
+  - name: users
+    description: 使用者與 KYC
+  - name: wallets
+    description: 錢包、充值、提領
+  - name: market
+    description: P2P 市場、訂單
+  - name: escrow
+    description: 託管 / 釋放
+  - name: admin
+    description: 管理後台
+paths:
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: 使用 Email 或手機註冊
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: 註冊成功，回傳簡要使用者資料與驗證需求
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: 登入（回傳 access token + refresh token cookie）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: 登入成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /auth/2fa/verify:
+    post:
+      tags: [auth]
+      summary: 驗證 TOTP 或 SMS 2FA
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                method:
+                  type: string
+                  enum: [totp, sms]
+                code:
+                  type: string
+      responses:
+        '200':
+          description: 2FA 驗證成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verified:
+                    type: boolean
+                    example: true
+  /auth/forgot-password:
+    post:
+      tags: [auth]
+      summary: 忘記密碼 - 取得重設 token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+      responses:
+        '200':
+          description: 如果 email 存在會寄出重設連結（為安全不顯示存在與否）
+  /users/me:
+    get:
+      tags: [users]
+      summary: 取得當前使用者資訊
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 使用者資料
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+  /users/kyc:
+    post:
+      tags: [users]
+      summary: 上傳 KYC 文件（返回審核狀態）
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                doc_type:
+                  type: string
+                  enum: [passport, id_card, driver_license]
+                doc_file:
+                  type: string
+                  format: binary
+                selfie:
+                  type: string
+                  format: binary
+      responses:
+        '202':
+          description: KYC 已送審
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KycResponse'
+  /wallets:
+    get:
+      tags: [wallets]
+      summary: 取得使用者所有錢包餘額
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 錢包列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Wallet'
+    post:
+      tags: [wallets]
+      summary: 為使用者新增錢包（內部管理/支援擴充）
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                currency:
+                  type: string
+                  example: BTC
+      responses:
+        '201':
+          description: 建立成功
+  /wallets/{currency}/deposit:
+    post:
+      tags: [wallets]
+      summary: 產生充值地址（回傳 address + QR）
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: currency
+          required: true
+          schema:
+            type: string
+            example: BTC
+      responses:
+        '200':
+          description: 地址與 QR
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  address:
+                    type: string
+                  tag:
+                    type: string
+                    nullable: true
+                  qr:
+                    type: string
+                    description: base64 or URL
+  /wallets/{currency}/withdraw:
+    post:
+      tags: [wallets]
+      summary: 提幣申請（需 2FA）
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: currency
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                to_address:
+                  type: string
+                amount:
+                  type: number
+                fee_priority:
+                  type: string
+                  enum: [low, medium, high]
+                two_fa_code:
+                  type: string
+      responses:
+        '202':
+          description: 提領已加入隊列，待風控/簽發
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  withdraw_id:
+                    type: string
+  /market/orders:
+    get:
+      tags: [market]
+      summary: 取得市場訂單列表 (可分頁/過濾)
+      parameters:
+        - in: query
+          name: side
+          schema:
+            type: string
+            enum: [buy, sell]
+        - in: query
+          name: currency
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: 訂單陣列
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Order'
+    post:
+      tags: [market]
+      summary: 下單 (maker)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: 建立訂單
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+  /market/orders/{orderId}/cancel:
+    post:
+      tags: [market]
+      summary: 取消訂單
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: orderId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 訂單已取消
+  /market/orders/{orderId}/take:
+    post:
+      tags: [market]
+      summary: 搭單（taker）— 建立 escrow
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: orderId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                payment_method:
+                  type: string
+                note:
+                  type: string
+      responses:
+        '201':
+          description: 已建立 escrow，回傳 escrow 資訊
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Escrow'
+  /escrow/{escrowId}:
+    get:
+      tags: [escrow]
+      summary: 取得 escrow 狀態
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: escrowId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: escrow 資訊
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Escrow'
+  /escrow/{escrowId}/release:
+    post:
+      tags: [escrow]
+      summary: 釋放資金（由賣方或仲裁）
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: escrowId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: 已釋放
+  /admin/users:
+    get:
+      tags: [admin]
+      summary: 後台取得使用者列表（需 admin 權限）
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - in: query
+          name: kyc_status
+          schema:
+            type: string
+            enum: [pending, approved, rejected]
+      responses:
+        '200':
+          description: 使用者陣列
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [identifier, password]
+      properties:
+        identifier:
+          type: string
+          description: Email 或手機號碼
+          example: user@example.com
+        password:
+          type: string
+          example: StrongP@ssw0rd
+        referral_code:
+          type: string
+    LoginRequest:
+      type: object
+      required: [identifier, password]
+      properties:
+        identifier:
+          type: string
+          example: user@example.com
+        password:
+          type: string
+    AuthResponse:
+      type: object
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        access_token:
+          type: string
+        expires_in:
+          type: integer
+          description: seconds
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          example: usr_123456
+        email:
+          type: string
+        phone:
+          type: string
+        level:
+          type: integer
+          description: 等級 0-3
+        kyc_status:
+          type: string
+          enum: [none, pending, approved, rejected]
+        created_at:
+          type: string
+          format: date-time
+    KycResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        submitted_at:
+          type: string
+          format: date-time
+    Wallet:
+      type: object
+      properties:
+        id:
+          type: string
+        currency:
+          type: string
+        address:
+          type: string
+          nullable: true
+        balance:
+          type: number
+        locked_balance:
+          type: number
+    CreateOrderRequest:
+      type: object
+      required: [side, currency, amount, price]
+      properties:
+        side:
+          type: string
+          enum: [buy, sell]
+        currency:
+          type: string
+          example: USDT
+        amount:
+          type: number
+        price:
+          type: number
+        payment_methods:
+          type: array
+          items:
+            type: string
+    Order:
+      type: object
+      properties:
+        id:
+          type: string
+        maker_id:
+          type: string
+        taker_id:
+          type: string
+          nullable: true
+        side:
+          type: string
+        currency:
+          type: string
+        amount:
+          type: number
+        price:
+          type: number
+        status:
+          type: string
+          enum: [open, matched, paid, released, dispute, cancelled]
+        created_at:
+          type: string
+          format: date-time
+    Escrow:
+      type: object
+      properties:
+        id:
+          type: string
+        order_id:
+          type: string
+        amount:
+          type: number
+        currency:
+          type: string
+        buyer_id:
+          type: string
+        seller_id:
+          type: string
+        status:
+          type: string
+          enum: [locked, paid, released, dispute, refunded]
+        expires_at:
+          type: string
+          format: date-time
+  responses:
+    BadRequest:
+      description: 無效的請求
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: 未授權
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas_extra:
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+security:
+  - bearerAuth: []
+
+x-note: |
+  - 這份規格為範例，可用於 swagger-ui / redoc 作為 mock 與開發參考。
+  - 如果你希望，我可以：
+    1) 轉成 JSON 並生成 mock server (e.g. prism 或 json-server)
+    2) 產生前端 TypeScript client（openapi-generator 或 axios-based client stub）
+    3) 擴充每個路由的 request/response 範例與 schema 詳細欄位
